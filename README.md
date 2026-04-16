@@ -1,0 +1,3 @@
+# AI Code Helper
+
+IntelliJ IDEA AI 编程助手插件 - 初始化中...
