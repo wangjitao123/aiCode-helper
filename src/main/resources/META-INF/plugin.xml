@@ -1,0 +1,90 @@
+<idea-plugin>
+    <id>com.aicode.helper</id>
+    <name>AI Code Helper</name>
+    <vendor email="support@aicode.helper" url="https://github.com/wangjitao123/aiCode-helper">AI Code Helper</vendor>
+
+    <description><![CDATA[
+        <h2>AI Code Helper - AI 编程助手</h2>
+        <p>强大的 IntelliJ IDEA AI 编程助手插件，支持以下功能：</p>
+        <ul>
+            <li><b>代码自动补全</b> - AI 驱动的智能代码补全建议</li>
+            <li><b>代码解释</b> - 选中代码后右键获取 AI 中文解释</li>
+            <li><b>代码优化</b> - 选中代码后获取 AI 优化建议，并可一键替换</li>
+            <li><b>项目结构分析</b> - 自动分析项目目录结构并生成 AI 摘要</li>
+            <li><b>AI 聊天窗口</b> - 侧边栏与 AI 自由对话，支持流式响应</li>
+        </ul>
+        <p>支持 OpenAI、DeepSeek、本地 Ollama 等兼容 OpenAI API 格式的服务。</p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.lang</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+
+        <!-- 应用级别设置 -->
+        <applicationService
+            serviceImplementation="com.aicode.helper.settings.AiCodeSettings"/>
+
+        <!-- 项目级别聊天历史服务 -->
+        <projectService
+            serviceImplementation="com.aicode.helper.service.ChatHistoryService"/>
+
+        <!-- 设置页面 -->
+        <applicationConfigurable
+            parentId="tools"
+            id="com.aicode.helper.settings"
+            displayName="AI Code Helper"
+            instance="com.aicode.helper.settings.AiCodeSettingsConfigurable"/>
+
+        <!-- Tool Window -->
+        <toolWindow
+            id="AI Code Helper"
+            anchor="right"
+            factoryClass="com.aicode.helper.toolwindow.AiChatToolWindowFactory"
+            icon="/icons/pluginIcon.svg"/>
+
+        <!-- 代码补全 -->
+        <completion.contributor
+            language="any"
+            implementationClass="com.aicode.helper.completion.AiCompletionContributor"
+            order="last"/>
+
+    </extensions>
+
+    <actions>
+        <!-- 编辑器右键菜单 -->
+        <group id="AiCodeHelper.EditorGroup" text="AI Code Helper" popup="true">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <action
+                id="AiCodeHelper.ExplainCode"
+                class="com.aicode.helper.actions.ExplainCodeAction"
+                text="AI 解释代码"
+                description="使用 AI 解释选中的代码"/>
+            <action
+                id="AiCodeHelper.OptimizeCode"
+                class="com.aicode.helper.actions.OptimizeCodeAction"
+                text="AI 优化代码"
+                description="使用 AI 优化选中的代码"/>
+        </group>
+
+        <!-- Tools 菜单 -->
+        <group id="AiCodeHelper.ToolsGroup" text="AI Code Helper" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action
+                id="AiCodeHelper.ProjectStructure"
+                class="com.aicode.helper.actions.ProjectStructureAction"
+                text="AI 分析项目结构"
+                description="使用 AI 分析当前项目结构"/>
+            <action
+                id="AiCodeHelper.ExplainCodeTools"
+                class="com.aicode.helper.actions.ExplainCodeAction"
+                text="AI 解释代码"
+                description="使用 AI 解释选中的代码"/>
+            <action
+                id="AiCodeHelper.OptimizeCodeTools"
+                class="com.aicode.helper.actions.OptimizeCodeAction"
+                text="AI 优化代码"
+                description="使用 AI 优化选中的代码"/>
+        </group>
+    </actions>
+</idea-plugin>
