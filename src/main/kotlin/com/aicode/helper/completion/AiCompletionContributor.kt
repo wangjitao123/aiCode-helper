@@ -8,13 +8,17 @@ import com.intellij.codeInsight.completion.CompletionResultSet
 import com.intellij.codeInsight.completion.PrioritizedLookupElement
 import com.intellij.codeInsight.lookup.LookupElementBuilder
 import com.intellij.icons.AllIcons
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.util.TextRange
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 class AiCompletionContributor : CompletionContributor() {
 
     private val log = Logger.getInstance(AiCompletionContributor::class.java)
+    private val executor = Executors.newCachedThreadPool()
 
     override fun fillCompletionVariants(parameters: CompletionParameters, result: CompletionResultSet) {
         val settings = AiCodeSettings.getInstance()
@@ -26,20 +30,16 @@ class AiCompletionContributor : CompletionContributor() {
 
         val lineNumber = document.getLineNumber(offset)
         val lineStart = document.getLineStartOffset(lineNumber)
-        val currentLine = document.getText(
-            TextRange(lineStart, offset)
-        ).trim()
+        val currentLine = document.getText(TextRange(lineStart, offset)).trim()
 
         if (currentLine.length < 3) return
 
         val startLine = maxOf(0, lineNumber - 20)
         val contextStart = document.getLineStartOffset(startLine)
-        val contextCode = document.getText(
-            TextRange(contextStart, offset)
-        )
+        val contextCode = document.getText(TextRange(contextStart, offset))
 
-        ApplicationManager.getApplication().executeOnPooledThread {
-            try {
+        try {
+            val future = executor.submit(Callable {
                 val apiService = AiApiService()
                 val messages = listOf(
                     AiApiService.Message(
@@ -53,26 +53,28 @@ class AiCompletionContributor : CompletionContributor() {
                         "代码上下文：\n```\n$contextCode\n```\n\n请给出当前行的代码补全建议（只输出补全内容）："
                     )
                 )
-                val completionText = apiService.chat(messages)
-                val suggestions = completionText.lines()
-                    .map { it.trim() }
-                    .filter { it.isNotBlank() }
-                    .take(3)
+                apiService.chat(messages)
+            })
 
-                ApplicationManager.getApplication().invokeLater {
-                    suggestions.forEachIndexed { index, suggestion ->
-                        val element = LookupElementBuilder.create(suggestion)
-                            .withIcon(AllIcons.Actions.IntentionBulb)
-                            .withTypeText("AI 补全")
-                            .withBoldness(true)
-                        result.addElement(
-                            PrioritizedLookupElement.withPriority(element, (100 - index).toDouble())
-                        )
-                    }
-                }
-            } catch (e: Exception) {
-                log.warn("AI 代码补全失败: ${e.message}")
+            val completionText = future.get(5, TimeUnit.SECONDS)
+            val suggestions = completionText.lines()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .take(3)
+
+            suggestions.forEachIndexed { index, suggestion ->
+                val element = LookupElementBuilder.create(suggestion)
+                    .withIcon(AllIcons.Actions.IntentionBulb)
+                    .withTypeText("AI 补全")
+                    .withBoldness(true)
+                result.addElement(
+                    PrioritizedLookupElement.withPriority(element, (100 - index).toDouble())
+                )
             }
+        } catch (e: TimeoutException) {
+            log.info("AI 代码补全超时")
+        } catch (e: Exception) {
+            log.warn("AI 代码补全失败: ${e.message}")
         }
     }
 }

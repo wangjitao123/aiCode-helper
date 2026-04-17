@@ -76,11 +76,11 @@ class OptimizeCodeAction : AnAction("AI 优化代码") {
         optimizationResult: String
     ) {
         val toolWindowManager = ToolWindowManager.getInstance(project)
-        val toolWindow = toolWindowManager.getToolWindow("AI Code Helper")
+        val toolWindow = toolWindowManager.getToolWindow("DEEPWAY CODE")
         toolWindow?.show()
 
         val chatPanel = AiChatToolWindowFactory.getInstance(project)
-        chatPanel?.appendMessage("助手", "**[代码优化建议]**\n\n$optimizationResult")
+        chatPanel?.appendMessage("assistant", "**[代码优化建议]**\n\n$optimizationResult")
 
         val optimizedCode = extractCodeFromMarkdown(optimizationResult)
 

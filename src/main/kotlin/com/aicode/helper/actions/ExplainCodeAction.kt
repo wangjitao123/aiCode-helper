@@ -67,10 +67,10 @@ class ExplainCodeAction : AnAction("AI 解释代码") {
 
     private fun showResultInToolWindow(project: Project, title: String, content: String) {
         val toolWindowManager = ToolWindowManager.getInstance(project)
-        val toolWindow = toolWindowManager.getToolWindow("AI Code Helper")
+        val toolWindow = toolWindowManager.getToolWindow("DEEPWAY CODE")
         toolWindow?.show()
 
         val chatPanel = AiChatToolWindowFactory.getInstance(project)
-        chatPanel?.appendMessage("助手", "**[$title]**\n\n$content")
+        chatPanel?.appendMessage("assistant", "**[$title]**\n\n$content")
     }
 }

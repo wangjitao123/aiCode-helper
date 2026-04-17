@@ -2,7 +2,7 @@ import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 
 plugins {
     id("java")
-    id("org.jetbrains.kotlin.jvm") version "1.9.25"
+    id("org.jetbrains.kotlin.jvm") version "2.1.0"
     id("org.jetbrains.intellij.platform") version "2.2.1"
 }
 
@@ -10,6 +10,7 @@ group = "com.aicode"
 version = "1.0.0"
 
 repositories {
+
     mavenCentral()
     intellijPlatform {
         defaultRepositories()
@@ -18,7 +19,7 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        create("IC", "2023.1")
+        create("IC", "2025.1")
         testFramework(TestFrameworkType.Platform)
     }
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
@@ -26,7 +27,7 @@ dependencies {
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
 }
 
 intellijPlatform {
@@ -34,7 +35,8 @@ intellijPlatform {
         name = "AI Code Helper"
         version = "1.0.0"
         ideaVersion {
-            sinceBuild = "231"
+            sinceBuild = "251"
+            untilBuild = "253.*"
         }
     }
     buildSearchableOptions = false

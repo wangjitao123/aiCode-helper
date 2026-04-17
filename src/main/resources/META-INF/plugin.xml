@@ -38,16 +38,20 @@
 
         <!-- Tool Window -->
         <toolWindow
-            id="AI Code Helper"
+            id="DEEPWAY CODE"
             anchor="right"
             factoryClass="com.aicode.helper.toolwindow.AiChatToolWindowFactory"
             icon="/icons/pluginIcon.svg"/>
 
-        <!-- 代码补全 -->
+        <!-- 代码补全（弹窗列表） -->
         <completion.contributor
             language="any"
             implementationClass="com.aicode.helper.completion.AiCompletionContributor"
             order="last"/>
+
+        <!-- 内联灰色文字补全（类似 Copilot） -->
+        <inline.completion.provider
+            implementationClass="com.aicode.helper.completion.AiInlineCompletionProvider"/>
 
     </extensions>
 
