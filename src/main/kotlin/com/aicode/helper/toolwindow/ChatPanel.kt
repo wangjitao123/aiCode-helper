@@ -1,20 +1,25 @@
 package com.aicode.helper.toolwindow
 
-import com.aicode.helper.agent.ProjectAnalysisAgent
-import com.aicode.helper.service.AiApiService
-import com.aicode.helper.service.ChatHistoryService
+import com.aicode.helper.agent.AgentSession
+import com.aicode.helper.agent.event.AgentEvent
 import com.aicode.helper.settings.AiCodeSettings
-import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.awt.*
 import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
 import javax.swing.*
 import javax.swing.text.html.HTMLEditorKit
 import javax.swing.text.html.StyleSheet
+import kotlin.coroutines.cancellation.CancellationException
 
 class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
@@ -43,16 +48,12 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val sendButton = createStyledButton("发送", isPrimary = true)
     private val clearButton = createStyledButton("清空", isPrimary = false)
 
-    private val historyService = ChatHistoryService.getInstance(project)
+    /** Agent 会话：持有跨多轮共享的 AgentState 与工具/hook/压缩组装。 */
+    private val agentSession = AgentSession(project)
 
-    private var currentStreamingBubble: ChatBubble? = null
-
-    private val projectAnalysisKeywords = listOf(
-        "项目结构", "项目分析", "分析项目", "分析一下项目", "项目架构",
-        "project structure", "analyze project", "项目概述", "项目组成",
-        "看看项目", "读一下项目", "了解项目", "了解一下项目", "介绍一下项目",
-        "这个项目", "看下项目", "项目是做什么", "项目做什么"
-    )
+    /** 收集 QueryEngine 事件流的协程作用域（决策 #1：消费 AsyncGenerator）。 */
+    private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var currentJob: Job? = null
 
     init {
         setupUI()
@@ -157,19 +158,20 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun setupListeners() {
-        sendButton.addActionListener { sendMessage() }
+        sendButton.addActionListener { onSendOrStop() }
 
         inputArea.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
                 if (e.keyCode == KeyEvent.VK_ENTER && e.isControlDown) {
-                    sendMessage()
+                    onSendOrStop()
                     e.consume()
                 }
             }
         })
 
         clearButton.addActionListener {
-            historyService.clear()
+            currentJob?.cancel()
+            agentSession.reset()
             chatMessages.clear()
             addWelcomeBubble()
             renderChat()
@@ -178,12 +180,12 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
     private fun addWelcomeBubble() {
         chatMessages.add(ChatBubble("system",
-            "**DEEPWAY CODE** \n\n" +
-            "欢迎使用 AI 编程助手！\n" +
-            "- 在下方输入框输入问题，按 **Ctrl+Enter** 发送\n" +
-            "- 输入「项目结构」等关键词，AI 会逐步读取文件分析项目\n" +
-            "- 右键编辑器代码使用「AI 解释代码」「AI 优化代码」\n" +
-            "- 在 Settings → Tools → AI Code Helper 配置 API"
+            "**DEEPWAY CODE** · Agentic Harness \n\n" +
+            "我是一个具备工具调用能力的 AI Agent：\n" +
+            "- 直接提问，我会按需调用 `project_structure` / `list_directory` / `read_file` / `grep_search` 等工具逐步探索项目再作答\n" +
+            "- 你能实时看到「调用工具 → 工具结果 → 推理」的过程（ReAct 主循环）\n" +
+            "- 运行中「发送」按钮会变为「停止」，可随时中断（取消整个生成器链）\n" +
+            "- 在 Settings → Tools → AI Code Helper 配置 API 与 Agent 选项"
         ))
     }
 
@@ -224,7 +226,13 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         }
     }
 
-    private fun sendMessage() {
+    private fun onSendOrStop() {
+        // 运行中：把「发送」当作「停止」——取消整个事件流（≈ generator.return()）
+        if (currentJob?.isActive == true) {
+            currentJob?.cancel()
+            return
+        }
+
         val userInput = inputArea.text.trim()
         if (userInput.isBlank()) return
 
@@ -237,99 +245,65 @@ class ChatPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         inputArea.text = ""
         chatMessages.add(ChatBubble("user", userInput))
+        val bubble = ChatBubble("assistant", "")
+        chatMessages.add(bubble)
         renderChat()
+        setRunning(true)
 
-        sendButton.isEnabled = false
-        sendButton.text = "..."
-
-        if (isProjectAnalysisQuestion(userInput)) {
-            startProjectAnalysis(userInput)
-        } else {
-            startNormalChat(userInput)
+        val engine = agentSession.newQuery()
+        currentJob = uiScope.launch {
+            try {
+                engine.query(userInput).collect { event ->
+                    handleEvent(event, bubble)
+                }
+            } catch (e: CancellationException) {
+                appendToBubble(bubble, "\n\n_⏹ 已停止_")
+            } catch (e: Exception) {
+                appendToBubble(bubble, "\n\n**错误:** ${e.message}")
+            } finally {
+                SwingUtilities.invokeLater { setRunning(false) }
+            }
         }
     }
 
-    private fun isProjectAnalysisQuestion(input: String): Boolean {
-        val lower = input.lowercase()
-        return projectAnalysisKeywords.any { lower.contains(it) }
-    }
-
-    private fun startProjectAnalysis(userQuestion: String) {
-        historyService.addMessage("user", userQuestion)
-
-        val bubble = ChatBubble("assistant", "")
-        chatMessages.add(bubble)
-        currentStreamingBubble = bubble
-
-        val agent = ProjectAnalysisAgent(
-            project = project,
-            onStep = { step ->
-                SwingUtilities.invokeLater {
-                    bubble.content += step
-                    renderChat()
-                }
-            },
-            onComplete = { fullResponse ->
-                historyService.addMessage("assistant", fullResponse)
-                currentStreamingBubble = null
-                SwingUtilities.invokeLater {
-                    sendButton.isEnabled = true
-                    sendButton.text = "发送"
-                }
-            },
-            onError = { error ->
-                SwingUtilities.invokeLater {
-                    bubble.content += "\n\n错误: $error"
-                    renderChat()
-                    currentStreamingBubble = null
-                    sendButton.isEnabled = true
-                    sendButton.text = "发送"
-                }
+    /** 决策 #1：把生成器流出的事件渲染成可见的 ReAct 过程。 */
+    private fun handleEvent(event: AgentEvent, bubble: ChatBubble) {
+        when (event) {
+            is AgentEvent.AssistantTextDelta -> appendToBubble(bubble, event.text)
+            is AgentEvent.ToolUseRequested ->
+                appendToBubble(bubble, "\n\n🔧 **调用工具** `${event.toolName}` ${shorten(event.argumentsJson, 160)}\n")
+            is AgentEvent.ToolResultEvent -> {
+                val icon = if (event.isError) "⚠️" else "✅"
+                appendToBubble(bubble, "$icon `${event.toolName}` 结果：\n```\n${shorten(event.output, 600)}\n```\n")
             }
-        )
-        agent.analyze(userQuestion)
+            is AgentEvent.Compaction ->
+                appendToBubble(bubble, "\n🗜️ _上下文压缩 [${event.layer}]：${event.detail}_\n")
+            is AgentEvent.Transitioned ->
+                appendToBubble(bubble, "\n🔁 _状态转移：${event.reason}_\n")
+            is AgentEvent.IterationStart ->
+                if (event.iteration > 1) appendToBubble(bubble, "\n\n— 第 ${event.iteration} 轮 —\n")
+            is AgentEvent.QueryComplete -> { /* 文本已通过增量逐步渲染，无需额外处理 */ }
+            is AgentEvent.ErrorEvent -> appendToBubble(bubble, "\n\n**错误:** ${event.message}")
+            is AgentEvent.ToolExecutionStarted -> { /* 可选，暂不展示 */ }
+        }
     }
 
-    private fun startNormalChat(userInput: String) {
-        historyService.addMessage("user", userInput)
+    private fun appendToBubble(bubble: ChatBubble, text: String) {
+        SwingUtilities.invokeLater {
+            bubble.content += text
+            renderChat()
+        }
+    }
 
-        val bubble = ChatBubble("assistant", "")
-        chatMessages.add(bubble)
-        currentStreamingBubble = bubble
+    private fun shorten(text: String, max: Int): String =
+        if (text.length <= max) text else text.take(max) + " …(已截断)"
 
-        val currentMessages = historyService.toApiMessages()
-        val apiService = AiApiService()
-        val responseBuffer = StringBuilder()
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            apiService.chatStream(
-                messages = currentMessages,
-                onChunk = { chunk ->
-                    responseBuffer.append(chunk)
-                    SwingUtilities.invokeLater {
-                        bubble.content = responseBuffer.toString()
-                        renderChat()
-                    }
-                },
-                onComplete = {
-                    val fullResponse = responseBuffer.toString()
-                    historyService.addMessage("assistant", fullResponse)
-                    currentStreamingBubble = null
-                    SwingUtilities.invokeLater {
-                        sendButton.isEnabled = true
-                        sendButton.text = "发送"
-                    }
-                },
-                onError = { errorMsg ->
-                    SwingUtilities.invokeLater {
-                        bubble.content += "\n\n错误: $errorMsg"
-                        renderChat()
-                        currentStreamingBubble = null
-                        sendButton.isEnabled = true
-                        sendButton.text = "发送"
-                    }
-                }
-            )
+    private fun setRunning(running: Boolean) {
+        sendButton.text = if (running) "停止" else "发送"
+        if (running) {
+            sendButton.background = Color(220, 70, 70)
+        } else {
+            sendButton.background = Color(0, 122, 255)
         }
     }
 

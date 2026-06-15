@@ -1,43 +1,71 @@
 # AI Code Helper
 
-> 一款功能强大的 IntelliJ IDEA AI 编程助手插件，支持代码解释、代码优化、项目结构分析、AI 聊天等功能。
+> 一款 IntelliJ IDEA 的 AI 编程助手插件。其核心已按照 Claude Code 的 **agent harness（智能体框架）** 设计思想重构：基于生成器的查询引擎、ReAct 主循环、工具系统、五层上下文压缩、流式并发工具执行与 Hook 架构。
+
+## 架构总览（Agent Harness）
+
+聊天窗口不再是“发一次请求、拿一次响应”，而是驱动一个真正的 **ReAct 智能体**：模型可以按需调用工具读取项目、搜索代码，逐步推理后再作答。整体设计对应 Claude Code 源码泄漏分析中的六个工程决策：
+
+| # | 决策 | 本项目对应实现 |
+|---|------|----------------|
+| 1 | **AsyncGenerator 核心** | `QueryEngine.query()` 返回冷 `Flow<AgentEvent>`，逐事件 `emit`（文本增量/工具调用/工具结果/压缩/错误）；下游 `collect` 取消 ≈ `generator.return()` | 
+| 2 | **while(true) + State 状态机** | `QueryEngine` 的 ReAct 主循环；`AgentState` 携带 `transition` 字段作为防死循环**断路器**（reactive_compact_retry / max_output_tokens_recovery） |
+| 3 | **五层上下文压缩** | `ContextManager`：microcompact → snip → autocompact → reactiveCompact → contextCollapse；常量见 `CompactionConstants`（含运营数据注释） |
+| 4 | **流式并发工具执行** | `StreamingToolExecutor`：模型仍在输出时即开始执行就绪工具；按 `isConcurrencySafe()` 调度；`siblingAbort` 同批次取消 |
+| 5 | **Hook 架构** | `HookManager` + `PreToolUse/PostToolUse/PostSampling/PreCompact/PostCompact`；PostSampling 错误被吞掉，不影响主循环；`PermissionHook` 做权限控制 |
+| 6 | **运营数据驱动决策** | `CompactionConstants` 中每个阈值都附带来历注释（如 p99.99 摘要输出 17,387 tokens → 预算 20,000） |
+
+### 内置工具
+
+| 工具 | 权限 | 并发安全 | 说明 |
+|------|------|----------|------|
+| `project_structure` | 只读 | ✅ | 项目目录结构与统计 |
+| `list_directory` | 只读 | ✅ | 列出目录内容 |
+| `read_file` | 只读 | ✅ | 读取文件内容 |
+| `grep_search` | 只读 | ✅ | 在源码中搜索文本 |
+| `write_file` | 写 | ❌ | 覆盖写文件（默认禁用，需在设置中授权） |
 
 ## 功能介绍
 
-### 1. 代码自动补全
+### 1. AI 智能体聊天（核心）
+- IDEA 右侧 **DEEPWAY CODE** 面板，直接提问
+- AI 以 ReAct 方式工作：**调用工具 → 查看工具结果 → 继续推理 → 给出回答**，过程实时可见
+- 运行时「发送」按钮变为「停止」，可随时中断（取消整个生成器链）
+- 支持多轮上下文；上下文过长时自动触发分层压缩
+
+### 2. 代码自动补全
 - 在编辑器中输入代码时，AI 自动提供智能代码补全建议
 - 支持 Java、Kotlin、Python、JavaScript、TypeScript 等多种语言
 
-### 2. 代码解释
+### 3. 代码解释
 - 选中代码 → 右键 → **AI Code Helper** → **AI 解释代码**
 - AI 以中文解释代码功能、实现逻辑、关键点和注意事项
-- 解释结果显示在右侧 AI Code Helper 面板
+- 解释结果显示在右侧 DEEPWAY CODE 面板
 
-### 3. 代码优化
+### 4. 代码优化
 - 选中代码 → 右键 → **AI Code Helper** → **AI 优化代码**
 - AI 给出优化建议和优化后的完整代码
 - 支持一键将优化代码替换到编辑器中
 
-### 4. 项目结构分析
+### 5. 项目结构分析
 - 菜单栏 → **Tools** → **AI Code Helper** → **AI 分析项目结构**
-- 自动分析项目目录结构、文件类型分布
-- AI 给出项目架构摘要和建议
-
-### 5. AI 聊天窗口
-- IDEA 右侧提供 **AI Code Helper** 面板
-- 支持与 AI 自由对话
-- 保持聊天历史记录
-- 支持流式响应（打字机效果）
-- 按 **Ctrl+Enter** 或点击「发送」按钮发送消息
+- 也可直接在聊天框提问“分析一下这个项目”，让智能体自行调用工具探索
 
 ### 6. 设置页面
 - 前往 **Settings → Tools → AI Code Helper**
-- 可配置：
+- 基础配置：
   - **API 地址**：默认 `https://api.openai.com`，支持自定义
   - **API Key**：你的 API 密钥
   - **模型名称**：如 `gpt-3.5-turbo`、`gpt-4`、`deepseek-chat` 等
   - **最大 Token 数**：控制响应长度（1 ~ 32000）
   - **Temperature**：控制 AI 创造性（0.00 ~ 1.00）
+- Agent / Harness 配置：
+  - **启用工具调用（Agent 模式）**：关闭后退化为纯聊天
+  - **自动放行只读工具** / **允许写工具**：权限控制（决策 #5）
+  - **启用 autocompact 自动上下文压缩**（决策 #3）
+  - **最大迭代次数**：ReAct 主循环断路器
+  - **上下文窗口 (tokens)**：autocompact 阈值判断
+  - **摘要模型**：压缩时使用的更便宜模型（留空则用主模型）
 
 ## 支持的 AI 服务
 
@@ -138,23 +166,30 @@ aiCode-helper/
 ├── gradle.properties             # Gradle 属性
 ├── src/main/
 │   ├── kotlin/com/aicode/helper/
+│   │   ├── agent/                # 🆕 Agent Harness 核心
+│   │   │   ├── QueryEngine.kt            # 决策#1/#2：Flow 生成器 + ReAct 主循环
+│   │   │   ├── AgentState.kt             # 决策#2：State + transition 断路器
+│   │   │   ├── AgentMessage.kt           # 含 tool_call/tool_result 的消息模型
+│   │   │   ├── AgentSession.kt           # 会话装配（工具/Hook/压缩/LLM）
+│   │   │   ├── StreamingToolExecutor.kt  # 决策#4：并发执行 + 并发安全调度 + sibling abort
+│   │   │   ├── event/AgentEvent.kt       # 决策#1：被 yield 的事件类型
+│   │   │   ├── tools/                    # 工具系统（权限 + isConcurrencySafe）
+│   │   │   │   ├── Tool.kt / ToolRegistry.kt / ToolSupport.kt
+│   │   │   │   ├── ReadFileTool / ListDirectoryTool / GrepSearchTool
+│   │   │   │   ├── ProjectStructureTool / WriteFileTool
+│   │   │   ├── hooks/                    # 决策#5：Hook 架构
+│   │   │   │   ├── AgentHook.kt / HookManager.kt / PermissionHook.kt
+│   │   │   └── context/                  # 决策#3/#6：五层压缩
+│   │   │       ├── ContextManager.kt / CompactionConstants.kt / TokenEstimator.kt
 │   │   ├── actions/              # 右键菜单 Action
-│   │   │   ├── ExplainCodeAction.kt
-│   │   │   ├── OptimizeCodeAction.kt
-│   │   │   └── ProjectStructureAction.kt
 │   │   ├── completion/           # 代码补全
-│   │   │   └── AiCompletionContributor.kt
 │   │   ├── service/              # 服务层
-│   │   │   ├── AiApiService.kt
+│   │   │   ├── AiApiService.kt           # 一次性请求（解释/优化/补全）
+│   │   │   ├── LlmClient.kt              # 🆕 流式 + tool-calling 客户端
 │   │   │   └── ChatHistoryService.kt
 │   │   ├── settings/             # 设置
-│   │   │   ├── AiCodeSettings.kt
-│   │   │   └── AiCodeSettingsConfigurable.kt
-│   │   ├── toolwindow/           # Tool Window UI
-│   │   │   ├── AiChatToolWindowFactory.kt
-│   │   │   └── ChatPanel.kt
+│   │   ├── toolwindow/           # Tool Window UI（驱动 QueryEngine）
 │   │   └── utils/                # 工具类
-│   │       └── ProjectStructureUtil.kt
 │   └── resources/META-INF/
 │       └── plugin.xml            # 插件描述符
 └── README.md

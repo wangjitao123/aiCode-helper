@@ -67,10 +67,10 @@ class ProjectStructureAction : AnAction("AI 分析项目结构") {
         aiAnalysis: String
     ) {
         val toolWindowManager = ToolWindowManager.getInstance(project)
-        val toolWindow = toolWindowManager.getToolWindow("AI Code Helper")
+        val toolWindow = toolWindowManager.getToolWindow("DEEPWAY CODE")
         toolWindow?.show()
 
         val chatPanel = AiChatToolWindowFactory.getInstance(project)
-        chatPanel?.appendMessage("助手", "**[项目结构分析]**\n\n$aiAnalysis")
+        chatPanel?.appendMessage("assistant", "**[项目结构分析]**\n\n$aiAnalysis")
     }
 }

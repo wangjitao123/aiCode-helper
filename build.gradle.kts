@@ -27,7 +27,9 @@ dependencies {
 }
 
 kotlin {
-    jvmToolchain(21)
+    // IntelliJ IDEA 2025.1 插件以 JDK 17 为目标即可（沙箱运行在 JBR 21，向下兼容 17 字节码）。
+    // 这里与本机可用的 JDK 17 对齐，避免 Gradle 触发 JDK 21 的自动下载。
+    jvmToolchain(17)
 }
 
 intellijPlatform {
