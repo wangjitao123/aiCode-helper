@@ -68,6 +68,8 @@ class QueryEngine(
             val assistantText = StringBuilder()
             val pendingCalls = ArrayList<ToolCall>()
             val executor = StreamingToolExecutor(parentJob, registry, hooks, toolCtx)
+            // 流式过滤器：把“文本协议工具调用”的标记从展示中隐藏，气泡保持干净
+            val streamFilter = ToolCallStreamFilter()
             var finishReason: String? = null
 
             // (b)(c)(d) 流式调用 + 收集 tool_use + 边流边执行
@@ -76,7 +78,8 @@ class QueryEngine(
                     when (ev) {
                         is LlmClient.StreamEvent.TextDelta -> {
                             assistantText.append(ev.text)
-                            emit(AgentEvent.AssistantTextDelta(ev.text))
+                            val safe = streamFilter.feed(ev.text)
+                            if (safe.isNotEmpty()) emit(AgentEvent.AssistantTextDelta(safe))
                         }
                         is LlmClient.StreamEvent.ToolCallReady -> {
                             val call = ToolCall(ev.id, ev.name, ev.argumentsJson)
@@ -89,6 +92,9 @@ class QueryEngine(
                         }
                     }
                 }
+                // 冲刷过滤器里暂留的安全文本
+                val tail = streamFilter.flush()
+                if (tail.isNotEmpty()) emit(AgentEvent.AssistantTextDelta(tail))
             } catch (ce: CancellationException) {
                 executor.cancelAll()
                 throw ce
@@ -111,18 +117,51 @@ class QueryEngine(
                 break
             }
 
-            // 追加助手消息（含工具调用）到规范历史
-            state.addAssistant(assistantText.toString(), pendingCalls)
-            lastAssistantText = assistantText.toString()
+            // 文本协议回退：很多模型（DeepSeek / 本地 Ollama / 各类开源模型）并不走
+            // OpenAI 原生 function-calling，而是把工具调用以文本形式写在回答里
+            // （如 <tool_call>{...}</tool_call>）。此时 pendingCalls 为空，会被误判为
+            // “没有工具调用 → 结束”。这里解析助手文本中的工具调用，补齐 ReAct 主循环。
+            var textProtocol = false
+            if (pendingCalls.isEmpty() && settings.enableTools) {
+                val textCalls = TextToolCallParser.parse(assistantText.toString(), registry)
+                if (textCalls.isNotEmpty()) {
+                    textProtocol = true
+                    for (c in textCalls) {
+                        pendingCalls.add(c)
+                        emit(AgentEvent.ToolUseRequested(c.id, c.name, c.argumentsJson))
+                        executor.submit(c) // 与原生路径一致，交给并发执行器
+                    }
+                }
+            }
+
+            // 追加助手消息到规范历史：
+            // - 原生 function-calling：带 toolCalls，结果用 tool 角色回填；
+            // - 文本协议：去掉工具调用标记，结果改用 user 文本回填
+            //   （只走文本协议的端点未必支持 tool 角色消息，这样兼容性最好）。
+            val assistantForHistory = if (textProtocol)
+                TextToolCallParser.strip(assistantText.toString()).ifBlank { "（正在调用工具…）" }
+            else assistantText.toString()
+            state.addAssistant(assistantForHistory, if (textProtocol) emptyList() else pendingCalls)
+            lastAssistantText = if (textProtocol) "" else assistantText.toString()
 
             // 决策 #5：PostSampling hook（错误被吞掉，不影响主循环）
-            hooks.firePostSampling(state, assistantText.toString(), pendingCalls)
+            hooks.firePostSampling(state, assistantForHistory, pendingCalls)
 
             // (e) 执行工具并把结果写回历史
             val results = executor.complete()
-            for (r in results) {
-                state.addToolResult(r.toolCallId, r.output)
-                emit(AgentEvent.ToolResultEvent(r.toolCallId, r.toolName, r.output, r.isError))
+            if (textProtocol) {
+                val sb = StringBuilder("以下是工具调用结果，请据此继续推理；若信息足够请直接给出最终回答：\n\n")
+                for (r in results) {
+                    emit(AgentEvent.ToolResultEvent(r.toolCallId, r.toolName, r.output, r.isError))
+                    sb.append("【工具 ").append(r.toolName).append(if (r.isError) " · 出错" else "").append("】\n")
+                        .append(r.output).append("\n\n")
+                }
+                state.addUser(sb.toString())
+            } else {
+                for (r in results) {
+                    state.addToolResult(r.toolCallId, r.output)
+                    emit(AgentEvent.ToolResultEvent(r.toolCallId, r.toolName, r.output, r.isError))
+                }
             }
 
             when {
@@ -158,10 +197,10 @@ class QueryEngine(
             你可以通过调用工具来探索当前项目并回答用户问题，而不是凭空猜测。
 
             可用工具：
-            - project_structure：获取项目目录结构与统计
-            - list_directory：列出某个目录内容
-            - read_file：读取某个文件内容
-            - grep_search：在源码中搜索文本
+            - project_structure：获取项目目录结构与统计（无参数）
+            - list_directory：列出某个目录内容（参数 path，相对项目根目录）
+            - read_file：读取某个文件内容（参数 path）
+            - grep_search：在源码中搜索文本（参数 query，可选 extension）
             - write_file：写文件（需用户授权，可能被拒绝）
 
             工作方式：
@@ -169,6 +208,16 @@ class QueryEngine(
             2. 拿到工具结果后再决定下一步，必要时继续调用工具。
             3. 信息足够后，用简洁清晰的中文给出最终回答；涉及代码时使用 Markdown 代码块。
             4. 不要编造文件内容或路径；不确定就用工具去查。
+
+            调用工具的格式：
+            - 如果你的运行环境支持原生函数调用（function calling），直接发起原生工具调用即可。
+            - 如果不支持，则当你需要调用工具时，请“只输出”如下标记块（不要在同一条消息里附加多余解释），
+              系统会自动解析并执行，然后把结果回传给你：
+              <tool_call>{"name": "工具名", "arguments": {参数对象}}</tool_call>
+              示例：
+              <tool_call>{"name": "project_structure", "arguments": {}}</tool_call>
+              <tool_call>{"name": "read_file", "arguments": {"path": "build.gradle.kts"}}</tool_call>
+              可一次输出多个 <tool_call> 块表示并行调用。收到“工具调用结果”后再继续推理或作答。
         """.trimIndent()
     }
 }
